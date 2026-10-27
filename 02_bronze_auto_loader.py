@@ -54,7 +54,7 @@ query = (stream.writeStream
 query.awaitTermination()
 
 # Rows read in this run; 0 on a re-run means nothing new
-print("rows read this run:", sum(p["numInputRows"] or 0 for p in query.recentProgress))
+print("rows read this run:", sum(p.numInputRows or 0 for p in query.recentProgress))
 
 # COMMAND ----------
 
