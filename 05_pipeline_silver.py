@@ -91,3 +91,50 @@ def cost_reconciliation():
     # Full outer join keeps a month even if only one export has it
     return (focus.join(actual, "billing_period", "full_outer")
                  .withColumn("difference", F.col("focus_billed") - F.col("actual_billed")))
+
+# COMMAND ----------
+
+# DBTITLE 1,Copilot usage silver view
+# Copilot data quality rules
+COPILOT_WARN_RULES = {
+    "gross_parsed":          "gross_amount IS NOT NULL",
+    "quantity_parsed":       "quantity IS NOT NULL",
+    "gross_matches_credits": "abs(gross_amount - quantity * applied_cost_per_quantity) <= 0.000001",  # GitHub's own math checks out
+}
+
+# Materialized view: a later export of the same days must REPLACE rows, so not a streaming table
+@dp.expect_all(COPILOT_WARN_RULES)                                          # warn: keep the row, count it
+@dp.expect_or_drop("has_usage_date", "usage_date IS NOT NULL")              # drop: usage with no date can't go in a daily total
+@dp.expect_or_fail("credits_unit", "unit_type = 'ai-credits'")              # fail: totals assume one unit, so stop
+@dp.materialized_view(name="finops.silver.copilot_usage",
+                      comment="GitHub Copilot AI usage: typed, blanks as NULL, newest export wins per day/user/model/repository. Contains usernames.")
+def copilot_usage():
+    # Bronze is all strings; try_cast gives NULL on a bad value, nullif turns blank text into NULL
+    typed = (spark.read.table("copilot_raw")
+             .withColumnRenamed("date", "usage_date")
+             .withColumns({
+                 "usage_date":                F.expr("try_cast(usage_date AS DATE)"),
+                 "quantity":                  F.expr("try_cast(quantity AS DECIMAL(20,10))"),
+                 "applied_cost_per_quantity": F.expr("try_cast(applied_cost_per_quantity AS DECIMAL(20,10))"),
+                 "gross_amount":              F.expr("try_cast(gross_amount AS DECIMAL(20,10))"),
+                 "discount_amount":           F.expr("try_cast(discount_amount AS DECIMAL(20,10))"),
+                 "net_amount":                F.expr("try_cast(net_amount AS DECIMAL(20,10))"),
+                 "aic_gross_amount":          F.expr("try_cast(aic_gross_amount AS DECIMAL(20,10))"),
+                 "aic_quantity":              F.expr("try_cast(aic_quantity AS DECIMAL(20,10))"),
+                 "total_monthly_quota":       F.expr("try_cast(total_monthly_quota AS BIGINT)"),
+                 "input":                     F.expr("try_cast(input AS BIGINT)"),
+                 "output":                    F.expr("try_cast(output AS BIGINT)"),
+                 "cache_read":                F.expr("try_cast(cache_read AS BIGINT)"),
+                 "cache_write":               F.expr("try_cast(cache_write AS BIGINT)"),
+                 "repository":                F.expr("nullif(trim(repository), '')"),
+                 "app_client_id":             F.expr("nullif(trim(app_client_id), '')"),
+                 "cost_center_name":          F.expr("nullif(trim(cost_center_name), '')"),
+             })
+             .withColumn("usage_month", F.trunc("usage_date", "month")))
+
+    # One row per day, user, model and repository: keep the one from the newest file
+    newest_first = (Window.partitionBy("usage_date", "username", "model", "repository", "product", "sku")
+                          .orderBy(F.desc("source_modified_at"), F.desc("source_file")))   # file name breaks ties
+    return (typed.withColumn("rn", F.row_number().over(newest_first))
+                 .filter("rn = 1")
+                 .drop("rn", "_rescued_data"))
