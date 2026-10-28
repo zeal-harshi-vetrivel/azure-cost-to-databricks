@@ -1,0 +1,6 @@
+   # Never commit data: exports and usage reports contain company spend, subscription IDs and usernames
+   *.csv
+   *.csv.gz
+   *.parquet
+   *.zip
+   manifest*.json
