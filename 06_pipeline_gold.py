@@ -130,9 +130,25 @@ def copilot_monthly():
 # COMMAND ----------
 
 # DBTITLE 1,Gold 5: Copilot per user monthly
-# Gold 5: Copilot per user per month (contains usernames; Step 8 masks them)
+# Gold 5: Copilot per user per month. username is masked: only finops_admins see real names
+# A mask on a pipeline table is declared in its schema, so every column is listed with its type
+COPILOT_USER_SCHEMA = """
+    usage_month               DATE,
+    username                  STRING MASK finops.governance.mask_username,
+    credits_used              DECIMAL(30,10),
+    list_cost                 DECIMAL(30,10),
+    billed_cost               DECIMAL(30,10),
+    active_days               BIGINT,
+    models_used               BIGINT,
+    output_tokens             BIGINT,
+    included_credits_per_seat BIGINT,
+    share_of_org_credits      DECIMAL(10,4),
+    pct_of_one_seat           DECIMAL(10,4)
+"""
+
 @dp.materialized_view(name="finops.gold.copilot_user_monthly",
-                      comment="GitHub Copilot per user per month. pct_of_one_seat compares with one seat's included credits; credits are pooled, so it is a fair-share signal, not a limit. Contains usernames.")
+                      schema=COPILOT_USER_SCHEMA,
+                      comment="GitHub Copilot per user per month. pct_of_one_seat compares with one seat's included credits; credits are pooled, so it is a fair-share signal, not a limit. username is masked for everyone outside finops_admins.")
 def copilot_user_monthly():
     per_user = (spark.read.table("finops.silver.copilot_usage")
                 .groupBy("usage_month", "username")
@@ -149,7 +165,11 @@ def copilot_user_monthly():
     return per_user.withColumns({
         "share_of_org_credits": F.round(F.try_divide(F.col("credits_used"), F.sum("credits_used").over(month)), 4),
         "pct_of_one_seat":      F.round(F.try_divide("credits_used", "included_credits_per_seat"), 4),
-    })
+    }).select(                                                   # fixed types, so the output matches the schema above
+        "usage_month", "username",
+        *[F.col(c).cast("DECIMAL(30,10)").alias(c) for c in ["credits_used", "list_cost", "billed_cost"]],
+        *[F.col(c).cast("BIGINT").alias(c) for c in ["active_days", "models_used", "output_tokens", "included_credits_per_seat"]],
+        *[F.col(c).cast("DECIMAL(10,4)").alias(c) for c in ["share_of_org_credits", "pct_of_one_seat"]])
 
 # COMMAND ----------
 
