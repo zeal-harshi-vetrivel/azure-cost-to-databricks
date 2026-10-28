@@ -4,7 +4,7 @@
 # MAGIC Second source file for `finops_cost_pipeline`. Reads `focus_raw` (bronze), fixes types, keeps only the latest export run per billing period.
 # MAGIC
 # MAGIC **Step 6c:** expectations check every silver row: warn (keep + count), drop (remove), fail (stop the update).
-# MAGIC A second view, `cost_reconciliation`, checks that the FOCUS total matches the actual-cost total for each month.
+# MAGIC A second view, `focus_load_check`, checks that the run we kept has exactly the rows its manifest says Azure wrote.
 # MAGIC
 # MAGIC **Before the first run:** `CREATE SCHEMA IF NOT EXISTS finops.silver;`
 
@@ -69,28 +69,30 @@ def focus_costs():
 
 # COMMAND ----------
 
-# Expectations check one row at a time, so to check a TOTAL we first build one row per month, then put rules on that
-@dp.expect("both_sources_present", "focus_billed IS NOT NULL AND actual_billed IS NOT NULL")   # warn: one export missing a month
-@dp.expect_or_fail("totals_match",
-                   "focus_billed IS NULL OR actual_billed IS NULL OR abs(focus_billed - actual_billed) <= 0.01")  # fail: totals disagree by more than a cent
-@dp.materialized_view(name="finops.silver.cost_reconciliation",
-                      comment="Billed total per billing period: FOCUS export vs actual-cost export")
-def cost_reconciliation():
-    # FOCUS side: silver is already typed and deduplicated
-    focus = (spark.read.table("finops.silver.focus_costs")
-             .groupBy("billing_period")
-             .agg(F.sum("BilledCost").alias("focus_billed"),
-                  F.count("*").alias("focus_rows")))
+# Each FOCUS run's manifest.json: Azure's own record of the run and how many rows it wrote
+# Path: exports/george-test-focus-cost/<billing period>/<run id>/manifest.json
+FOCUS_MANIFESTS = "/Volumes/finops/raw/real_exports/exports/george-test-focus-cost/*/*/manifest.json"
 
-    # Actual-cost side: same dedupe, then convert the text column before adding it up
-    actual = (latest_run(spark.read.table("actual_raw"))
-              .groupBy("billing_period")
-              .agg(F.sum(F.expr("try_cast(costInBillingCurrency AS DECIMAL(18,6))")).alias("actual_billed"),
-                   F.count("*").alias("actual_rows")))
+def focus_manifests():
+    return (spark.read.option("multiLine", True)          # each manifest is one JSON document over many lines
+            .json(FOCUS_MANIFESTS)
+            .select(F.col("runInfo.runId").alias("run_id"),
+                    F.col("dataRowCount").alias("manifest_rows"),
+                    F.to_date("runInfo.endDate").alias("covers_until")))
 
-    # Full outer join keeps a month even if only one export has it
-    return (focus.join(actual, "billing_period", "full_outer")
-                 .withColumn("difference", F.col("focus_billed") - F.col("actual_billed")))
+# One row per billing period: the run we kept, its rows, and the manifest's count for that run
+# Counted in bronze (before silver drops bad rows), so it checks loading + picking the newest run
+@dp.expect_or_fail("manifest_found", "manifest_rows IS NOT NULL")         # fail: data with no manifest = run still being written, or files missing
+@dp.expect_or_fail("rows_match_manifest", "loaded_rows = manifest_rows")  # fail: we loaded more or fewer rows than Azure wrote
+@dp.materialized_view(name="finops.silver.focus_load_check",
+                      comment="Per billing period: rows loaded from the newest FOCUS run vs the row count in its manifest")
+def focus_load_check():
+    loaded = (latest_run(spark.read.table("focus_raw"))
+              .groupBy("billing_period", "run_id")
+              .agg(F.count("*").alias("loaded_rows")))
+
+    # Left join keeps the run even if its manifest is missing (manifest_rows is then NULL and the rule fails)
+    return loaded.join(focus_manifests(), "run_id", "left")
 
 # COMMAND ----------
 
