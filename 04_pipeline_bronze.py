@@ -33,6 +33,7 @@ def read_csv_files(folder, file_glob):
                 F.current_timestamp().alias("ingested_at")))
 
 # Thin wrapper for one Azure export folder (data files only, skips manifest.json)
+# Only the FOCUS export is loaded: it already has billed, effective and list cost
 def read_export(export_name):
     return read_csv_files(f"{EXPORTS_DIR}/{export_name}/", "part_*.csv.gz")
 
@@ -42,13 +43,6 @@ def read_export(export_name):
 @dp.table(name="focus_raw", comment="FOCUS cost export rows, loaded by Auto Loader")
 def focus_raw():
     return read_export("george-test-focus-cost")
-
-# COMMAND ----------
-
-# Streaming table: actual-cost export rows (different column layout, so its own table)
-@dp.table(name="actual_raw", comment="Actual cost export rows, loaded by Auto Loader")
-def actual_raw():
-    return read_export("george-test-actual-cost")
 
 # COMMAND ----------
 
